@@ -1,0 +1,19 @@
+[package]
+name = "mc_money_money_programm_v4"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+axum = {version = "0.6.20",features = ["ws"]}
+leptos = { version = "0.4.8", features = ["ssr"] }
+tokio = { version = "1.32.0", features = ["full"] }
+libsql-client = "0.31.11"
+anyhow = "1.0.75"
+totp-rs = { version = "5.2.0", features = ["qr", "gen_secret"] }
+serde = { version = "1.0.188", features = ["derive"] }
+axum-extra = { version = "0.7.7", features = ["cookie"] }
+serde_json = "1.0.105"
+chrono = "0.4.28"
+rand = { version = "0.8.5", features = ["small_rng"] }

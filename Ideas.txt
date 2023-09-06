@@ -1,0 +1,27 @@
+api: trans-actions need to have a name ("Purchased {item_name}" for example)
+api: trans-actions can only be requested, so you dont have to login to the shop/idk your buying from
+cc: have a program for editing the config for the default programs
+cc: create good enough lib layer to make creating custom stuff easier
+cc-utils: make a util that makes uis and ticks and stuff simple
+
+
+
+default/example programs: shop
+
+is there a way to restirct the file acces of a computer in a diskdrive? if yes use pocket computers for stuff
+maybe even do away with disk drives in general and sync that stuff over the internet or ingame modem system
+
+probably doing user auth using wireless modems
+
+make a system that uses the ingame wireless modems to communicate the shops in range(adjustable by user tho probably max is 64)
+
+
+TODO: implement the example/default stuff shop and pocket computer "os"
+
+transaction data: (
+    buyer: username,
+    seller: auth_token,
+    cost: number,
+    product/service: string
+    amount: int,
+)
