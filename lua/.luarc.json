@@ -1,13 +1,14 @@
 {
     "$schema": "https://raw.githubusercontent.com/sumneko/vscode-lua/master/setting/schema.json",
     "workspace.library": [
-        "${3rd}/luv/library",
-        "~/lua_lsp_plugins"
+        "~/lua_lsp_plugins/lua-ls-cc-tweaked"
     ],
+    "workspace.checkThirdParty": false,
     "diagnostics": {
         "groupSeverity": {
             "type-check": "Error",
             "unbalanced": "Error"
         }
-    }
+    },
+    "completion.autoRequire": false
 }

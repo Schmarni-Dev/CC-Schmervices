@@ -16,7 +16,7 @@ probably doing user auth using wireless modems
 make a system that uses the ingame wireless modems to communicate the shops in range(adjustable by user tho probably max is 64)
 
 
-TODO: implement the example/default stuff shop and pocket computer "os"
+TODO: implement the example/default stuff shop and pocket computer tui
 
 transaction data: (
     buyer: username,
