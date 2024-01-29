@@ -6,9 +6,9 @@ use axum::{
     routing::post,
     Json, Router,
 };
-use libsql_client::{args, Statement};
 use serde::Deserialize;
 use serde_json::json;
+use sqlx::{query, Acquire};
 
 use crate::{
     auth::{AuthUser, RequestType},
@@ -16,7 +16,7 @@ use crate::{
     App,
 };
 
-pub fn get_router() -> Router<App, Body> {
+pub fn get_router() -> Router<App> {
     Router::new()
         .route("/get_displayname", post(get_displayname))
         .route("/request_transaction", post(request_transaction))
@@ -48,12 +48,9 @@ async fn handle_notify(state: &App, id: &str, accepted: bool) {
     } else {
         "transaction_rejected"
     };
-    match state.transaction_notif_sockets.lock().await.remove(id) {
-        Some(mut socket) => {
-            _ = socket.send(Message::Text(msg.to_owned())).await;
-            _ = socket.close().await;
-        }
-        None => {},
+    if let Some(mut socket) = state.transaction_notif_sockets.lock().await.remove(id) {
+        _ = socket.send(Message::Text(msg.to_owned())).await;
+        _ = socket.close().await;
     }
 }
 
@@ -67,21 +64,20 @@ async fn notify_transaction(
         Some((name, _)) => name,
         None => Err(StatusCode::UNAUTHORIZED)?,
     };
-    let can_read_status = state
-        .db
-        .lock()
-        .await
-        .execute(Statement::with_args(
-            "SELECT 1 FROM transactions WHERE seller = ? OR buyer = ?;",
-            args!(&user, &user),
-        ))
-        .await
-        .is_ok_and(|o| {
-            o.rows.into_iter().flat_map(|v| v.values).any(|v| match v {
-                libsql_client::Value::Integer { value } => value == 1,
-                _ => false,
-            })
-        });
+    let can_read_status = sqlx::query!(
+        "SELECT true FROM transactions WHERE seller = ? OR buyer = ?;",
+        user,
+        user
+    )
+    .fetch_one(
+        &mut *state
+            .db
+            .acquire()
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    )
+    .await
+    .is_ok_and(|o| o.r#true == 1);
     if !can_read_status {
         Err(StatusCode::UNAUTHORIZED)?;
     }
@@ -105,35 +101,30 @@ async fn accept_transaction(
         Some((name, _)) => name,
         None => Err(StatusCode::UNAUTHORIZED)?,
     };
+    let mut conn = match state.db.acquire().await {
+        Ok(conn) => conn,
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR)?,
+    };
+    let exsits = sqlx::query!(
+        "SELECT true FROM transactions WHERE id= ? AND buyer = ?;",
+        transaction_id,
+        user
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .is_ok_and(|r| r.r#true == 1);
 
-    let exits = state
-        .db
-        .lock()
-        .await
-        .execute(Statement::with_args(
-            "SELECT 1 FROM transactions WHERE id= ? AND buyer = ?;",
-            args!(&transaction_id, &user),
-        ))
-        .await
-        .is_ok_and(|o| {
-            o.rows.into_iter().flat_map(|v| v.values).any(|v| match v {
-                libsql_client::Value::Integer { value } => value == 1,
-                _ => false,
-            })
-        });
-    if !exits {
+    if !exsits {
         Err(StatusCode::NOT_FOUND)?;
     }
-    state
-        .db
-        .lock()
-        .await
-        .execute(Statement::with_args(
-            "UPDATE transactions SET accepted = 1 WHERE id = ? AND buyer=?;",
-            args!(&transaction_id, &user),
-        ))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    sqlx::query!(
+        "UPDATE transactions SET accepted = 1 WHERE id = ? AND buyer = ?;",
+        transaction_id,
+        user
+    )
+    .execute(&mut *conn)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     handle_notify(&state, &transaction_id, true).await;
 
@@ -151,34 +142,30 @@ async fn reject_transaction(
         None => Err(StatusCode::UNAUTHORIZED)?,
     };
 
-    let exits = state
-        .db
-        .lock()
-        .await
-        .execute(Statement::with_args(
-            "SELECT 1 FROM transactions WHERE id= ? AND buyer = ?;",
-            args!(&transaction_id, &user),
-        ))
-        .await
-        .is_ok_and(|o| {
-            o.rows.into_iter().flat_map(|v| v.values).any(|v| match v {
-                libsql_client::Value::Integer { value } => value == 1,
-                _ => false,
-            })
-        });
-    if !exits {
+    let mut conn = match state.db.acquire().await {
+        Ok(conn) => conn,
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR)?,
+    };
+    let exsits = sqlx::query!(
+        "SELECT true FROM transactions WHERE id= ? AND buyer = ?;",
+        transaction_id,
+        user
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .is_ok_and(|r| r.r#true == 1);
+
+    if !exsits {
         Err(StatusCode::NOT_FOUND)?;
     }
-    state
-        .db
-        .lock()
-        .await
-        .execute(Statement::with_args(
-            "UPDATE transactions SET accepted = 2 WHERE id = ? AND buyer=?;",
-            args!(&transaction_id, &user),
-        ))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    sqlx::query!(
+        "UPDATE transactions SET accepted = 2 WHERE id = ? AND buyer = ?;",
+        transaction_id,
+        user
+    )
+    .execute(&mut *conn)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     handle_notify(&state, &transaction_id, false).await;
 
     Ok(StatusCode::OK.into_response())
@@ -193,24 +180,26 @@ async fn request_transaction(
         Some((name, _)) => name,
         None => Err(StatusCode::UNAUTHORIZED)?,
     };
+    let now = chrono::Utc::now().timestamp();
     let id = get_random_string(8);
-    state
-        .db
-        .lock()
-        .await
-        .execute(Statement::with_args(
-            "INSERT INTO transactions VALUES (?,?,?,?,?,0,?)",
-            args!(
-                &id,
-                &data.buyer,
-                &user,
-                &data.name,
-                data.amount,
-                chrono::Utc::now().timestamp()
-            ),
-        ))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    sqlx::query!(
+        "INSERT INTO transactions VALUES (?,?,?,?,?,0,?)",
+        id,
+        data.buyer,
+        user,
+        data.name,
+        data.amount,
+        now
+    )
+    .execute(
+        &mut *state
+            .db
+            .acquire()
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok((StatusCode::OK, Json(id)))
 }
@@ -225,6 +214,7 @@ async fn get_displayname(
     RequestType(req_type): RequestType,
     ApiRequest(data): ApiRequest<UsingToken>,
 ) -> axum::response::Result<Json<String>> {
+    println!("TODO: add logging!");
     match req_type {
         crate::util::RequestTypeEnum::Html => Err(StatusCode::UNSUPPORTED_MEDIA_TYPE.into()),
         crate::util::RequestTypeEnum::Json => {

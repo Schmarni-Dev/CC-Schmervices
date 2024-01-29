@@ -3,8 +3,10 @@ mod db_utils;
 pub mod util;
 use auth::AuthUser;
 use db_utils::*;
+use sqlx::SqlitePool;
+use tower_http::services::ServeDir;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, env, sync::Arc};
 
 use axum::{
     extract::{ws::WebSocket, State},
@@ -14,31 +16,30 @@ use axum::{
     Router,
 };
 use leptos::{ssr::render_to_string as render, *};
-use libsql_client::Client;
 use tokio::sync::Mutex;
 
 use totp_rs::{Secret, TOTP};
 
 mod auth;
+
+pub type DBPool = SqlitePool;
 #[derive(Clone)]
 pub struct App {
-    db: Arc<Mutex<Client>>,
+    db: Arc<DBPool>,
     transaction_notif_sockets: Arc<Mutex<HashMap<String, WebSocket>>>,
 }
 use util::*;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> eyre::Result<()> {
     run().await
 }
-async fn run() -> anyhow::Result<()> {
-    let db = Client::from_env().await?;
-    setup_db(&db).await?;
+async fn run() -> eyre::Result<()> {
+    let pool = SqlitePool::connect(&env::var("DATABASE_URL")?).await?;
     let state = App {
-        db: Arc::new(Mutex::new(db)),
+        db: Arc::new(pool),
         transaction_notif_sockets: Arc::new(Mutex::new(HashMap::new())),
     };
-    // build our application with a single route
     let app = Router::new()
         .route(
             "/css",
@@ -54,43 +55,42 @@ async fn run() -> anyhow::Result<()> {
         .route("/login_form", post(login_form))
         .nest("/", auth::get_router())
         .nest("/api", api::get_router())
+        .nest_service("/lua", ServeDir::new("lua"))
         .with_state(state);
 
     // run it with hyper on localhost:3000
-    axum::Server::bind(&"0.0.0.0:3000".parse().unwrap())
-        .serve(app.into_make_service())
-        .await
-        .unwrap();
-    anyhow::Ok(())
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
+    axum::serve(listener, app).await.unwrap();
+    eyre::Ok(())
 }
 
 async fn register_form() -> Response {
-    render_html(|cx| view! {cx, <RegisterForm/>})
+    render_html(|| view! {<RegisterForm/>})
 }
 async fn login_form() -> Response {
-    render_html(|cx| view! {cx, <LoginForm/>})
+    render_html(|| view! {<LoginForm/>})
 }
 
 #[component]
-pub fn base_64_image(cx: Scope, base64: String, alt: String) -> impl IntoView {
-    view! {cx, <img src=format!("data:image/png;base64,{}",base64) alt=alt/>}
+pub fn base_64_image(base64: String, alt: String) -> impl IntoView {
+    view! { <img src=format!("data:image/png;base64,{}",base64) alt=alt/>}
 }
 
-fn get_otp(secret: Secret, username: &str) -> anyhow::Result<TOTP> {
+fn get_otp(secret: Secret, username: &str) -> eyre::Result<TOTP> {
     Ok(TOTP::new(
         totp_rs::Algorithm::SHA1,
         6,
         1,
         30,
         secret.to_bytes().unwrap(),
-        Some("Money Money Program".to_string()),
+        Some("Schmervices".to_string()),
         username.to_string(),
     )?)
 }
 
 #[component]
-fn login_form(cx: Scope) -> impl IntoView {
-    view! {cx,
+fn login_form() -> impl IntoView {
+    view! {
         <form hx-post="/login" hx-swap="outerHTML">
             <label>Username: </label>
             <input type="text" name="username"> </input>
@@ -104,8 +104,8 @@ fn login_form(cx: Scope) -> impl IntoView {
 }
 
 #[component]
-fn register_form(cx: Scope) -> impl IntoView {
-    view! {cx,
+fn register_form() -> impl IntoView {
+    view! {
         <form hx-post="/register" hx-swap="outerHTML">
             <label>Display Name:</label>
             <input type="text" name="display_name"> </input>
@@ -119,28 +119,25 @@ fn register_form(cx: Scope) -> impl IntoView {
 }
 
 async fn increment_and_get_visits(state: &App) -> Option<i64> {
-    state
-        .db
-        .lock()
-        .await
-        .execute(
-            "UPDATE system
+    let mut conn = state.db.acquire().await.ok()?;
+    sqlx::query!(
+        "UPDATE system
              SET visits = visits + 1
-             WHERE key = 0;",
-        )
-        .await
-        .ok()?;
-    let data = get_ints_from_db(
-        state,
+             WHERE key = 0;"
+    )
+    .execute(&mut *conn)
+    .await
+    .ok()?;
+
+    let data = sqlx::query!(
         "SELECT visits
          FROM system
-         WHERE key = 0;",
+         WHERE key = 0;"
     )
+    .fetch_one(&mut *conn)
     .await
-    .unwrap()
-    .first()?
-    .clone();
-    Some(data)
+    .ok()?;
+    data.visits
 }
 
 async fn index(State(state): State<App>, AuthUser(user): AuthUser) -> Html<String> {
@@ -154,14 +151,14 @@ async fn index(State(state): State<App>, AuthUser(user): AuthUser) -> Html<Strin
     } else {
         None
     };
-    let html = render(move |cx| {
+    let html = render(move || {
         let greeting = display_name.map(|name| {
             move || {
                 view! {cx, <h1>"Hello "{name.clone()}</h1>}
             }
         });
 
-        view! {cx,
+        view! {
             <head>
                 <script type="text/javascript" src="https://unpkg.com/htmx.org@1.9.4"></script>
                 <meta charset="UTF-8"></meta>

@@ -1,18 +1,15 @@
 use axum::{
     async_trait,
-    body::HttpBody,
-    extract::FromRequest,
-    http::{header::ACCEPT, HeaderMap, HeaderValue, Request, StatusCode},
+    extract::{FromRequest, Request},
+    http::{header::ACCEPT, HeaderMap, HeaderValue, StatusCode},
     response::{Html, IntoResponse, Response},
-    BoxError, Form, Json,
+    Form, Json,
 };
-use leptos::{ssr::render_to_string, IntoView, Scope};
-use libsql_client::{args, Statement};
+use leptos::{ssr::render_to_string, IntoView};
 use rand::seq::IteratorRandom;
 use serde::de::DeserializeOwned;
 
-pub struct ApiRequest<T: DeserializeOwned> (
-    pub  T);
+pub struct ApiRequest<T: DeserializeOwned>(pub T);
 
 #[derive(Clone, Copy)]
 pub enum RequestTypeEnum {
@@ -21,23 +18,22 @@ pub enum RequestTypeEnum {
 }
 
 pub fn get_random_string(length: u8) -> String {
-let letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".chars();
-    let string = (0..length).into_iter().map(|_| {
-        letters.clone().choose(&mut rand::thread_rng()).unwrap()
-    }).collect();
-
-    string
-
+    let letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".chars();
+    (0..length)
+        .map(|_| letters.clone().choose(&mut rand::thread_rng()).unwrap())
+        .collect()
 }
 
 pub async fn get_displayname_from_valid_auth_token(app: &App, token: &str) -> Option<String> {
-    let w = get_string_from_db(app, 
-        Statement::with_args(
-            "SELECT display_name FROM auth_tokens INNER JOIN users USING(username) WHERE token = ? ;", 
-            args!(token)
-        )
-    ).await;
-    w.map_err(|err| {println!("join err: {}",err);err}).ok()
+    sqlx::query!(
+        "SELECT display_name FROM auth_tokens INNER JOIN users USING(username) WHERE token = ? ;",
+        token
+    )
+    .fetch_one(&mut *app.db.acquire().await.ok()?)
+    .await
+    .ok()
+    .map(|r| r.display_name)
+    // w.map_err(|err| {println!("join err: {}",err);err}).ok()
 }
 
 macro_rules! err_handle {
@@ -50,20 +46,20 @@ macro_rules! err_handle {
 }
 pub(crate) use err_handle;
 
-use crate::{db_utils::get_string_from_db, App};
+use crate::App;
 pub fn render_html<F, N>(f: F) -> Response
 where
-    F: FnOnce(Scope) -> N + 'static,
+    F: FnOnce() -> N + 'static,
     N: IntoView,
 {
     render_html_into_body(f).into_response()
 }
 pub fn render_html_into_body<F, N>(f: F) -> Html<String>
 where
-    F: FnOnce(Scope) -> N + 'static,
+    F: FnOnce() -> N + 'static,
     N: IntoView,
 {
-    Html::from(render_to_string(f))
+    Html::from(render_to_string(f).to_string())
 }
 
 pub fn get_requested_type(headers: &HeaderMap<HeaderValue>) -> Option<RequestTypeEnum> {
@@ -84,31 +80,29 @@ pub fn get_requested_type(headers: &HeaderMap<HeaderValue>) -> Option<RequestTyp
 }
 
 #[async_trait]
-impl<S, B, T> FromRequest<S, B> for ApiRequest<T>
+impl<S, T> FromRequest<S> for ApiRequest<T>
 where
     T: DeserializeOwned,
-    B: HttpBody + Send + 'static + Sync,
-    B::Data: Send,
-    B::Error: Into<BoxError>,
     S: Send + Sync,
 {
     type Rejection = StatusCode;
 
-    async fn from_request(req: Request<B>, state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         Ok(match get_requested_type(req.headers()) {
             Some(RequestTypeEnum::Json) => {
                 let data = Json::<T>::from_request(req, state).await;
-                let out = data.map_err(|err|{ println!("Json Err: {}",err) ;StatusCode::EXPECTATION_FAILED})?.0;
-                ApiRequest (
-                    out
-                )
+                let out = data
+                    .map_err(|err| {
+                        println!("Json Err: {}", err);
+                        StatusCode::EXPECTATION_FAILED
+                    })?
+                    .0;
+                ApiRequest(out)
             }
             Some(RequestTypeEnum::Html) => {
                 let data = Form::<T>::from_request(req, state).await;
                 let out = data.map_err(|_| StatusCode::BAD_REQUEST)?.0;
-                ApiRequest (
-                    out
-                )
+                ApiRequest(out)
             }
 
             _ => return Err(StatusCode::BAD_REQUEST),

@@ -2,33 +2,31 @@ use std::{fmt::Debug, ops::Add};
 
 use axum::{
     async_trait,
-    body::{Body, HttpBody},
-    extract::{FromRef, FromRequest, FromRequestParts, State},
-    http::{request::Parts, Request, StatusCode},
-    response::{Html, IntoResponse, Response},
+    extract::{FromRef, FromRequestParts, State},
+    http::{request::Parts, StatusCode},
+    response::{IntoResponse, Response},
     routing::post,
-    BoxError, Form, Json, RequestExt, RequestPartsExt, Router,
+    Json, RequestPartsExt, Router,
 };
 use axum_extra::extract::{cookie::Cookie, CookieJar};
 use chrono::Duration;
 use leptos::*;
-use libsql_client::{args, Statement};
 use serde_json::json;
 use totp_rs::Secret;
 
 use crate::{
-    db_utils::{get_displayname_from_username, get_string_from_db, get_strings_from_db},
+    db_utils::get_displayname_from_username,
     get_otp, render_html,
     util::{err_handle, get_requested_type, render_html_into_body, ApiRequest, RequestTypeEnum},
     App, Base64Image, LoginForm, RegisterForm,
 };
 
-pub const AUTH_IDENT: &'static str = "Money-Auth-Key";
+pub const AUTH_IDENT: &str = "Money-Auth-Key";
 pub fn get_auth_token_lifetime() -> Duration {
     Duration::weeks(1)
 }
 
-pub fn get_router() -> Router<App, Body> {
+pub fn get_router() -> Router<App> {
     Router::new()
         .route("/register", post(register))
         .route("/login", post(login))
@@ -56,7 +54,7 @@ async fn logout(
     let err = err_handle!(
         req_type,
         |err: String| Json(json!({"error":err})).into_response(),
-        |err: String| render_html(|cx| view! {cx,
+        |err: String| render_html(|| view! {
             <div class="text-red-600">{err}</div>
         })
     );
@@ -64,40 +62,33 @@ async fn logout(
         Some(d) => d,
         None => return err("Logout From what exactly?".to_string()),
     };
-
-    _ = state
-        .db
-        .lock()
-        .await
-        .execute(Statement::with_args(
-            "DELETE FROM TABLE auth_tokens WHERE token = ?",
-            &[token],
-        ))
+    let mut conn = match state.db.acquire().await {
+        Ok(v) => v,
+        Err(e) => return err(e.to_string()),
+    };
+    // TODO: Send Error to client
+    let _ = sqlx::query!("DELETE FROM auth_tokens WHERE token = ?", token)
+        .execute(&mut *conn)
         .await;
-    match (req_type, cookie_jar) {
-        (RequestTypeEnum::Html, Some(jar)) => {
-            let jar = jar.remove(Cookie::named(AUTH_IDENT));
-            return (StatusCode::OK, jar).into_response();
-        }
-        _ => {}
+    if let (RequestTypeEnum::Html, Some(jar)) = (req_type, cookie_jar) {
+        let jar = jar.remove(Cookie::from(AUTH_IDENT));
+        return (StatusCode::OK, jar).into_response();
     }
 
     StatusCode::OK.into_response()
 }
-async fn gen_token_and_store_in_db(app: &App, username: &str) -> anyhow::Result<String> {
+async fn gen_token_and_store_in_db(app: &App, username: &str) -> eyre::Result<String> {
     let token = Secret::generate_secret().to_encoded().to_string();
-    app.db
-        .lock()
-        .await
-        .execute(Statement::with_args(
-            "INSERT INTO auth_tokens VALUES (?,?,?)",
-            args!(
-                token.clone(),
-                username.clone(),
-                (chrono::Utc::now() + get_auth_token_lifetime()).timestamp()
-            ),
-        ))
-        .await?;
+    let expire_stamp = (chrono::Utc::now() + get_auth_token_lifetime()).timestamp();
+
+    sqlx::query!(
+        "INSERT INTO auth_tokens VALUES (?,?,?)",
+        token,
+        username,
+        expire_stamp
+    )
+    .execute(&mut *app.db.acquire().await?)
+    .await?;
     Ok(token)
 }
 
@@ -110,19 +101,21 @@ async fn login(
     let err = err_handle!(
         req_type,
         |err: String| Json(json!({"error":err})).into_response(),
-        |err: String| render_html(|cx| view! {cx,
+        |err: String| render_html(|| view! {
             <div class="text-red-600">{err}</div>
             <LoginForm/>
         })
     );
     let username = data.username.to_lowercase();
-    let otp_secret = match get_strings_from_db(
-        &state,
-        Statement::with_args("SELECT secret FROM users WHERE username = ?;", &[&username]),
-    )
-    .await
-    {
-        Ok(secret) => secret.first().expect("pls be impossible").clone(),
+    let mut conn = match state.db.acquire().await {
+        Ok(v) => v,
+        Err(e) => return err(e.to_string()),
+    };
+    let r = sqlx::query!("SELECT secret FROM users WHERE username = ?;", username)
+        .fetch_one(&mut *conn)
+        .await;
+    let otp_secret = match r {
+        Ok(secret) => secret.secret,
         Err(_) => return err("User Not Found".to_owned()),
     };
     let otp_secret = Secret::Encoded(otp_secret);
@@ -141,9 +134,8 @@ async fn login(
                 Some(j) => j,
                 None => return StatusCode::BAD_REQUEST.into_response(),
             };
-            match cookie_jar.get(AUTH_IDENT) {
-                Some(_) => return err("already logged in!".to_string()),
-                None => (),
+            if cookie_jar.get(AUTH_IDENT).is_some() {
+                return err("already logged in!".to_string());
             }
             let token = match gen_token_and_store_in_db(&state, &username).await {
                 Ok(token) => token,
@@ -158,8 +150,8 @@ async fn login(
             let cookie_jar = cookie_jar.add(cookie);
             (
                 cookie_jar,
-                render_html_into_body(move |cx| {
-                    view! {cx,
+                render_html_into_body(move || {
+                    view! {
                         <p>Hi {display_name}</p>
                         <p>otp correct: {correct}</p>
                     }
@@ -186,45 +178,44 @@ async fn register(
     let err = err_handle!(
         req_type,
         |err: String| Json(json!({"error":err})).into_response(),
-        |err: String| render_html(|cx| view! {cx,
+        |err: String| render_html(|| view! {
             <div class="text-red-600">{err}</div>
             <br/>
             <RegisterForm/>
         })
     );
 
-    if data.username.contains(":") {
-        return err("Username Contains Forbidden \":\" Symbol".to_owned());
+    if data.username.contains(':') {
+        return err("Username Contains Forbidden \':\' Symbol".to_owned());
     };
     let username = data.username.to_lowercase();
     let secret = Secret::generate_secret();
     let otp = get_otp(secret, &username).unwrap();
-    let qr_code = otp.get_qr().unwrap();
+    let qr_code = otp.get_qr_base64().unwrap();
     let secret = otp.get_secret_base32();
-    match state
-        .db
-        .lock()
-        .await
-        .execute(Statement::with_args(
-            "INSERT INTO users VALUES (?,?,?,1000,FALSE);",
-            &[
-                otp.account_name.clone(),
-                data.display_name.clone(),
-                secret.clone(),
-            ],
-        ))
-        .await
+    let mut conn = match state.db.acquire().await {
+        Ok(v) => v,
+        Err(e) => return err(e.to_string()),
+    };
+    match sqlx::query!(
+        "INSERT INTO users VALUES (?,?,?,1000,FALSE);",
+        otp.account_name,
+        data.display_name,
+        secret
+    )
+    .execute(&mut *conn)
+    .await
     {
-        Ok(_) => render_html(|cx| {
-            view! {cx,
+        Ok(_) => render_html(|| {
+            view! {
                 <div>
                     <Base64Image base64=qr_code alt="Qr Code".to_string()/>
                     <p>OTP Secret:{secret}</p>
                 </div>
             }
         }),
-        Err(_) => render_html(|cx| {
-            view! {cx,
+        Err(_) => render_html(|| {
+            view! {
                 Error while inserting user into Database
                 <RegisterForm />
             }
@@ -247,30 +238,27 @@ where
 pub struct AuthUser(pub Option<(String, String)>);
 
 async fn check_db_for_auth_token(token: &str, db: &App) -> Option<String> {
-    let out = get_string_from_db(
-        db,
-        Statement::with_args(
-            "SELECT username FROM auth_tokens WHERE token = ? AND expire_timestamp > ?;",
-            args!(token, chrono::Utc::now().timestamp()),
-        ),
+    let mut conn = db.db.acquire().await.ok()?;
+    let now = chrono::Utc::now().timestamp();
+    let out = sqlx::query!(
+        "SELECT username FROM auth_tokens WHERE token = ? AND expire_timestamp > ?;",
+        token,
+        now
     )
+    .fetch_one(&mut *conn)
     .await
     .ok()?;
-    let _ = db
-        .db
-        .lock()
-        .await
-        .execute(Statement::with_args(
-            "UPDATE auth_tokens SET expire_timestamp = ? WHERE token = ?;",
-            args!(
-                chrono::Utc::now()
-                    .add(get_auth_token_lifetime())
-                    .timestamp(),
-                token
-            ),
-        ))
-        .await;
-    Some(out)
+    let new = chrono::Utc::now()
+        .add(get_auth_token_lifetime())
+        .timestamp();
+    let _ = sqlx::query!(
+        "UPDATE auth_tokens SET expire_timestamp = ? WHERE token = ?;",
+        token,
+        new
+    )
+    .execute(&mut *conn)
+    .await;
+    Some(out.username)
 }
 pub struct RequestType(pub RequestTypeEnum);
 #[async_trait]
@@ -281,7 +269,7 @@ where
     type Rejection = StatusCode;
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         Ok(RequestType(
-            get_requested_type(&parts.headers).ok_or_else(|| StatusCode::UNSUPPORTED_MEDIA_TYPE)?,
+            get_requested_type(&parts.headers).ok_or(StatusCode::UNSUPPORTED_MEDIA_TYPE)?,
         ))
     }
 }
@@ -312,16 +300,10 @@ where
                 AuthUser(out)
             }
             Some(RequestTypeEnum::Json) => {
-                let user = match parts
-                    .headers
-                    .get(AUTH_IDENT)
-                    .map(|v| v.to_str().ok())
-                    .flatten()
-                {
-                    Some(token) => match check_db_for_auth_token(token, &app_state).await {
-                        Some(user) => Some((user, token.to_owned())),
-                        None => None,
-                    },
+                let user = match parts.headers.get(AUTH_IDENT).and_then(|v| v.to_str().ok()) {
+                    Some(token) => check_db_for_auth_token(token, &app_state)
+                        .await
+                        .map(|user| (user, token.to_owned())),
                     None => None,
                 };
                 return Ok(AuthUser(user));
