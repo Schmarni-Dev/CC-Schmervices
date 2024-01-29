@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE system\n             SET visits = visits + 1\n             WHERE key = 0;",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "d6c9d67c610790eeb371992eae7f9968775de003c05a00546300c6c08c291b0f"
+}
