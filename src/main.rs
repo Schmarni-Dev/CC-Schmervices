@@ -35,6 +35,7 @@ async fn main() -> eyre::Result<()> {
     run().await
 }
 async fn run() -> eyre::Result<()> {
+    color_eyre::install()?;
     let pool = SqlitePool::connect(&env::var("DATABASE_URL")?).await?;
     let state = App {
         db: Arc::new(pool),
@@ -167,13 +168,13 @@ async fn index(State(state): State<App>, AuthUser(user): AuthUser) -> Html<Strin
             </head>
             <body>
                 {greeting}
-                <button hx-post="/register_form" hx-swap="outerHTML" class="border-4">
+                <button hx-post="/register_form" hx-swap="outerHTML" class="button">
                     Signup
                 </button>
-                <button hx-post="/login_form" hx-swap="outerHTML" class="border-4">
+                <button hx-post="/login_form" hx-swap="outerHTML" class="button">
                     Login
                 </button>
-                <button hx-post="/logout" hx-swap="afterend" class="border-4">
+                <button hx-post="/logout" hx-swap="afterend" class="button">
                     Logout
                 </button>
             <footer>Visits: {visits} </footer>

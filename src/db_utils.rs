@@ -1,4 +1,4 @@
-use crate::{App, DBPool};
+use crate::App;
 
 pub async fn get_displayname_from_username(app: &App, username: &str) -> eyre::Result<String> {
     let r = sqlx::query!(

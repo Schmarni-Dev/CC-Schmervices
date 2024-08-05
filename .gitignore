@@ -2,3 +2,5 @@
 m.db
 money.db
 /.sqlx
+money.db-wal
+money.db-shm

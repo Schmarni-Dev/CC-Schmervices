@@ -1,3 +1,18 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+body {
+background-color: #0f0f0f;
+		color: #fff;		
+}
+
+.button {
+		background: linear-gradient(135deg, #ffaaff,#9944bb);
+		font-weight: bold;
+		padding: 0.33em;
+		margin: 0.165em;
+		border-radius: 1em;
+		border-width: 0px;
+		color: #fff;		
+}
